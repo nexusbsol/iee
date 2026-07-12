@@ -3,3 +3,4 @@ __pycache__/
 iee.config.yml
 .iee-history.json
 iee-history.json
+.github/
