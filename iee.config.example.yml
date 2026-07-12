@@ -1,0 +1,32 @@
+# iee.config.yml — configuración local, específica de tu entorno.
+# Copia este archivo a iee.config.yml (o a ~/.config/iee/config.yml) y
+# ajusta las listas. iee.py detecta iee.config.yml automáticamente si está
+# en el directorio desde el que corres el script, o puedes pasarlo con
+# --config /ruta/a/tu/config.yml. NO subas tu config real a git si tiene
+# nombres de clientes/proyectos que prefieras mantener privados — este
+# archivo de ejemplo solo tiene placeholders genéricos.
+
+# Carpetas de primer nivel que son proyectos/apps conocidos y esperados.
+# Cualquier carpeta que NO esté acá (ni en excluir_dirs/raiz_esperados)
+# aparece como "sin catalogar" — útil como alerta temprana de que algo
+# nuevo apareció sin que lo hayas registrado (por ejemplo, para que un
+# script de backup no la salte en silencio).
+proyectos_conocidos:
+  - mi-proyecto-1
+  - mi-proyecto-2
+
+# Archivos/carpetas sueltos en la raíz que son esperados y no cuentan como
+# "huérfanos". Se suma a los genéricos que iee.py ya trae (.bashrc, .ssh,
+# .config, etc.) — no hace falta repetirlos acá.
+raiz_esperados:
+  - mi-script.sh
+  - README.md
+
+# Carpetas que no aportan al análisis de estructura (además de las
+# genéricas que iee.py ya excluye: .git, node_modules, __pycache__, etc.)
+excluir_dirs:
+  - mi-app-de-terceros-instalada-completa
+
+# Dónde guardar el historial de scores entre corridas (para ver tendencia
+# en el tiempo). Si no se define, usa <ruta-analizada>/.iee-history.json
+historial_path: ~/.local/share/iee/history.json
