@@ -87,5 +87,4 @@ See [Scoring & Fix Safety](scoring-and-fix-safety.md) for the full algorithm.
 |---|---|
 | [`iee.py`](../iee.py) | Entire application: scanning, scoring, reporting, fix planning/execution, config loading, history |
 | [`iee.config.example.yml`](../iee.config.example.yml) | Configuration template with placeholder values |
-| [`.gitignore`](../.gitignore) | Ignores `iee.config.yml`, history files, and `__pycache__` |
-| [`.github/workflows/openwiki-update.yml`](../.github/workflows/openwiki-update.yml) | Scheduled daily OpenWiki documentation update workflow |
+| [`.gitignore`](../.gitignore) | Ignores `iee.config.yml`, history files, `__pycache__`, and `.github/` |
