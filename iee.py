@@ -110,9 +110,37 @@ def cargar_config(ruta_config: Path | None) -> Config:
     return cfg
 
 
-def registrar_historial(resultado: "ResultadoIEE", historial_path: Path) -> None:
+def _historial_path_permitido(historial_path_resuelto: Path, raiz: Path) -> bool:
+    """Contiene la escritura del historial a ubicaciones esperadas: dentro de
+    la raíz escaneada, o en los directorios de config/datos del propio iee.
+    Evita que un iee.config.yml (auto-detectado, sin opt-in explícito) pueda
+    apuntar historial_path a una ruta arbitraria del sistema."""
+    bases = (
+        raiz.resolve(),
+        (Path.home() / ".config" / "iee").resolve(),
+        (Path.home() / ".local" / "share" / "iee").resolve(),
+    )
+    return any(
+        historial_path_resuelto == base or base in historial_path_resuelto.parents
+        for base in bases
+    )
+
+
+def registrar_historial(resultado: "ResultadoIEE", historial_path: Path, raiz: Path) -> None:
     """Agrega el score de esta corrida al historial (best-effort, no bloquea)."""
     try:
+        # Resolver una sola vez y operar siempre sobre esa misma ruta ya
+        # resuelta: valida y usa el mismo Path en todas las operaciones de
+        # filesystem para no reabrir una ventana TOCTOU entre el chequeo del
+        # allow-list y las llamadas que siguen (cada una re-resolvería
+        # symlinks por su cuenta si partiéramos de la ruta sin resolver).
+        historial_path = historial_path.resolve()
+        if not _historial_path_permitido(historial_path, raiz):
+            print(
+                f"AVISO: historial_path ({historial_path}) está fuera de la raíz escaneada "
+                f"o de ~/.config/iee y ~/.local/share/iee — no se escribe el historial."
+            )
+            return
         historial = []
         if historial_path.exists():
             historial = json.loads(historial_path.read_text(encoding="utf-8"))
@@ -507,7 +535,7 @@ def main() -> None:
 
     if not args.no_history:
         historial_path = cfg.historial_path or (raiz / ".iee-history.json")
-        registrar_historial(resultado, historial_path)
+        registrar_historial(resultado, historial_path, raiz)
 
     if args.json:
         print(json.dumps(asdict(resultado), ensure_ascii=False, indent=2))
