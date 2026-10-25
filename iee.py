@@ -14,6 +14,10 @@ Uso:
   python3 iee.py --json                         # salida JSON
   python3 iee.py --list-conocidos                # lista proyectos_conocidos existentes
   python3 iee.py --no-history                    # no registrar en el historial
+  python3 iee.py --clasificar                    # qué es cada carpeta sin catalogar y qué hacer
+  python3 iee.py --adoptar NOMBRE [--motivo ".."]  # agrega la carpeta a proyectos_conocidos (respaldo)
+  python3 iee.py --ignorar NOMBRE [--motivo ".."]  # la deja como esperada pero SIN respaldo
+  (--adoptar/--ignorar aceptan --simular; --adoptar exige --confirmar-datos si hay datos o .env)
 
 Configuración: ver iee.config.example.yml. Sin config, corre con defaults
 genéricos y sin proyectos_conocidos propios — el primer run va a mostrar
@@ -25,6 +29,9 @@ ajústalo y pásalo con --config (o déjalo en ./iee.config.yml o
 import argparse
 import json
 import os
+import re
+import subprocess
+import tempfile
 import shutil
 import statistics
 from dataclasses import dataclass, field, asdict
@@ -108,6 +115,238 @@ def cargar_config(ruta_config: Path | None) -> Config:
     if datos.get("historial_path"):
         cfg.historial_path = Path(datos["historial_path"]).expanduser()
     return cfg
+
+
+# --------------------------------------------------------------------------
+# Catastro asistido: clasificar carpetas sin catalogar y adoptarlas/ignorarlas
+# editando la config sin perder comentarios (no usa un dumper de YAML).
+# --------------------------------------------------------------------------
+EXT_DATOS = {".db", ".sqlite", ".sqlite3", ".xlsx", ".xls", ".csv"}
+PATRON_COPIA_O_PRUEBA = re.compile(
+    r"(\.bak|-bak|\.old|\.orig|backup|backups|test|prueba|pruebas|evidencia|residuo|scratch|tmp|archivo)", re.I
+)
+BACKUPS_DE_CONFIG_MAX = 3
+
+
+def _nombre_valido(nombre: str) -> bool:
+    return bool(nombre) and nombre not in (".", "..") and "/" not in nombre and "\0" not in nombre
+
+
+def inspeccionar_carpeta(carpeta: Path, excluir: set | None = None, max_archivos: int = 50000) -> dict:
+    """Mira el contenido sin modificar nada: git, tamaño (sin venvs/caches), archivos de datos y .env."""
+    excluir = excluir or EXCLUIR_DIRS_BASE
+    info = {"git": (carpeta / ".git").exists(), "bytes": 0, "archivos": 0, "datos": set(), "env": False}
+    for dirpath, dirs, files in os.walk(carpeta):
+        dirs[:] = [d for d in dirs if d not in excluir]
+        for fn in files:
+            info["archivos"] += 1
+            if info["archivos"] > max_archivos:
+                info["truncado"] = True
+                return info
+            p = Path(dirpath) / fn
+            try:
+                info["bytes"] += p.lstat().st_size
+            except OSError:
+                pass
+            ext = p.suffix.lower()
+            if ext in EXT_DATOS:
+                info["datos"].add(ext)
+            if fn == ".env" or fn.startswith(".env."):
+                if not fn.endswith((".example", ".sample", ".template")):
+                    info["env"] = True
+    return info
+
+
+def referencias_activas(raiz: Path, nombre: str, textos: dict) -> list:
+    """Fuentes (cron, unidades systemd...) cuyo texto menciona la carpeta por su ruta completa."""
+    ruta = str(raiz / nombre)
+    return sorted(k for k, tx in textos.items() if ruta + "/" in tx or tx.rstrip().endswith(ruta) or ruta + " " in tx)
+
+
+def textos_de_ejecucion() -> dict:
+    """Texto del crontab del usuario y de las unidades systemd del sistema (best-effort, solo lectura)."""
+    textos = {}
+    try:
+        r = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            textos["crontab"] = r.stdout
+    except (OSError, subprocess.SubprocessError):
+        pass
+    unidades = Path("/etc/systemd/system")
+    if unidades.is_dir():
+        for u in unidades.glob("*.service"):
+            try:
+                textos[f"unidad {u.name}"] = u.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                pass
+    return textos
+
+
+def clasificar_carpeta(raiz: Path, nombre: str, excluir: set, textos: dict) -> dict:
+    info = inspeccionar_carpeta(raiz / nombre, excluir)
+    refs = referencias_activas(raiz, nombre, textos)
+    if refs:
+        clase = "activa"
+    elif PATRON_COPIA_O_PRUEBA.search(nombre):
+        clase = "copia_o_prueba"
+    else:
+        clase = "revisar"
+    return {"nombre": nombre, "clase": clase, "referencias": refs, **info}
+
+
+def _tam(b: int) -> str:
+    for u in ("B", "KB", "MB", "GB"):
+        if b < 1024 or u == "GB":
+            return f"{b:.0f} {u}" if u == "B" else f"{b:.1f} {u}"
+        b /= 1024
+    return f"{b} B"
+
+
+def imprimir_clasificacion(raiz: Path, nombres: list, cfg: "Config") -> None:
+    if not nombres:
+        print("\n  No hay carpetas sin catalogar.\n")
+        return
+    textos = textos_de_ejecucion()
+    print(f"\n  Carpetas sin catalogar en {raiz} ({len(nombres)}):\n")
+    for n in sorted(nombres):
+        c = clasificar_carpeta(raiz, n, cfg.excluir_dirs, textos)
+        marcas = []
+        if c["git"]:
+            marcas.append("git")
+        if c["datos"]:
+            marcas.append("datos " + "/".join(sorted(c["datos"])))
+        if c["env"]:
+            marcas.append(".env")
+        titulo = {"activa": "ACTIVA (la usa un cron o un servicio)", "copia_o_prueba": "copia o prueba (por el nombre)",
+                  "revisar": "a revisar (no la usa ningún cron ni servicio)"}[c["clase"]]
+        print(f"  • {n}  —  {titulo}")
+        print(f"      {_tam(c['bytes'])}, {c['archivos']} archivos" + (f", {', '.join(marcas)}" if marcas else "")
+              + (" (conteo truncado)" if c.get("truncado") else ""))
+        if c["referencias"]:
+            print(f"      referenciada por: {', '.join(c['referencias'][:4])}")
+        flag = " --confirmar-datos" if (c["datos"] or c["env"]) else ""
+        if c["clase"] == "activa":
+            print(f"      sugerido: iee.py --adoptar {n}{flag}   (entra al respaldo)")
+        elif c["clase"] == "copia_o_prueba":
+            print(f"      sugerido: borrarla si ya no sirve (con tu visto bueno) o iee.py --ignorar {n} (sin respaldo)")
+        else:
+            print(f"      sugerido: decidir; iee.py --adoptar {n}{flag} (con respaldo) o iee.py --ignorar {n} (sin respaldo)")
+        print()
+
+
+def _linea_item(nombre: str, motivo: str, sangria: str) -> str:
+    if re.search(r"""[:#\[\]{},&*!|>'"%@`]|^\s|\s$|^-""", nombre):
+        nombre = json.dumps(nombre, ensure_ascii=False)
+    motivo = " ".join((motivo or "").split())
+    nota = f"adoptado/clasificado {datetime.now():%Y-%m-%d}" + (f": {motivo}" if motivo else "")
+    return f"{sangria}- {nombre}  # {nota}"
+
+
+def _insertar_en_lista(texto: str, clave: str, nombre: str, motivo: str) -> str:
+    lineas = texto.split("\n")
+    idx = next((i for i, l in enumerate(lineas) if re.match(rf"^{re.escape(clave)}\s*:", l)), None)
+    if idx is None:
+        base = texto if (texto.endswith("\n") or not texto) else texto + "\n"
+        return base + f"{clave}:\n" + _linea_item(nombre, motivo, "  ") + "\n"
+    resto = lineas[idx].split(":", 1)[1].strip()
+    if resto and not resto.startswith("#"):
+        raise ValueError(f"'{clave}' está escrita en línea ({resto[:30]}...); conviértela a lista con guiones para poder editarla")
+    fin, sangria = idx, "  "
+    for j in range(idx + 1, len(lineas)):
+        l = lineas[j]
+        m = re.match(r"^(\s+)-\s", l)
+        if m:
+            fin, sangria = j, m.group(1)
+        elif l.strip() == "" or l.lstrip().startswith("#"):
+            continue
+        elif re.match(r"^\S", l):
+            break
+        else:
+            fin = j
+    lineas.insert(fin + 1, _linea_item(nombre, motivo, sangria))
+    return "\n".join(lineas)
+
+
+def _escribir_atomico(ruta: Path, contenido: str) -> None:
+    modo = ruta.stat().st_mode & 0o777
+    fd, tmp = tempfile.mkstemp(dir=str(ruta.parent), prefix=ruta.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(contenido)
+        os.chmod(tmp, modo)
+        os.replace(tmp, ruta)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def _respaldar_config(ruta: Path) -> Path:
+    destino = ruta.with_name(f"{ruta.name}.bak-iee-{datetime.now():%Y%m%d%H%M%S}")
+    shutil.copy2(ruta, destino)
+    previos = sorted(ruta.parent.glob(f"{ruta.name}.bak-iee-*"))
+    for viejo in previos[:-BACKUPS_DE_CONFIG_MAX]:
+        viejo.unlink()
+    return destino
+
+
+def catalogar(accion: str, nombres: list, raiz: Path, ruta_config: Path | None, motivo: str,
+              simular: bool, confirmar_datos: bool) -> int:
+    """accion: 'adoptar' (proyectos_conocidos: se respalda) o 'ignorar' (raiz_esperados: esperada, sin respaldo)."""
+    if ruta_config is None:
+        print("ERROR: no encontré la config. Pásala con --config ruta/iee.config.yml.")
+        return 1
+    if yaml is None:
+        print("ERROR: falta pyyaml (pip install pyyaml) para validar la config.")
+        return 1
+    clave = "proyectos_conocidos" if accion == "adoptar" else "raiz_esperados"
+    cfg = cargar_config(ruta_config)
+    actuales = cfg.proyectos_conocidos if accion == "adoptar" else cfg.raiz_esperados
+    texto = ruta_config.read_text(encoding="utf-8")
+    textos = textos_de_ejecucion() if accion == "adoptar" else {}
+    cambios = []
+    for n in nombres:
+        if not _nombre_valido(n):
+            print(f"ERROR: nombre no válido: {n!r} (es el nombre de una carpeta directamente dentro de {raiz}, sin rutas).")
+            return 1
+        if not (raiz / n).is_dir():
+            print(f"ERROR: {raiz / n} no existe o no es una carpeta. No se cambió nada.")
+            return 1
+        if n in actuales:
+            print(f"  {n}: ya está en {clave}. Nada que hacer.")
+            continue
+        if accion == "adoptar":
+            c = clasificar_carpeta(raiz, n, cfg.excluir_dirs, textos)
+            sensibles = sorted(c["datos"]) + ([".env"] if c["env"] else [])
+            print(f"  {n}: {_tam(c['bytes'])}, {c['archivos']} archivos" + (", git" if c["git"] else "")
+                  + (f", contiene {', '.join(sensibles)}" if sensibles else "") + f" [{c['clase']}]")
+            if sensibles and not confirmar_datos:
+                print(f"  → NO adoptada: contiene {', '.join(sensibles)} (pueden ser datos personales o secretos) y adoptarla "
+                      f"copia todo eso al respaldo en la nube. Si quieres respaldarla igual: "
+                      f"iee.py --adoptar {n} --confirmar-datos --motivo \"...\"")
+                return 2
+        texto = _insertar_en_lista(texto, clave, n, motivo)
+        cambios.append(n)
+    if not cambios:
+        return 0
+    try:
+        nuevo = yaml.safe_load(texto) or {}
+        faltan = [n for n in cambios if n not in set(nuevo.get(clave, []))]
+        if faltan:
+            raise ValueError(f"tras editar, {faltan} no aparecen en {clave}")
+    except Exception as e:  # noqa: BLE001
+        print(f"ERROR: la edición dejaría la config inválida ({e}). No se cambió nada.")
+        return 1
+    efecto = ("entra(n) al respaldo diario" if accion == "adoptar"
+              else "queda(n) como esperada(s) en la raíz y NO se respalda(n) ni se avisa más")
+    if simular:
+        print(f"\n  SIMULACIÓN: se agregaría(n) a {clave}: {', '.join(cambios)} — {efecto}. No se escribió nada.")
+        return 0
+    bak = _respaldar_config(ruta_config)
+    _escribir_atomico(ruta_config, texto)
+    print(f"\n  Listo: {', '.join(cambios)} agregada(s) a {clave} en {ruta_config} — {efecto}.")
+    print(f"  Respaldo de la config anterior: {bak.name} (se conservan los últimos {BACKUPS_DE_CONFIG_MAX}).")
+    return 0
 
 
 def _historial_path_permitido(historial_path_resuelto: Path, raiz: Path) -> bool:
@@ -329,7 +568,8 @@ def escanear(raiz: Path, cfg: Config) -> ResultadoIEE:
         resultado.recomendaciones.append(
             f"⚠️ {len(resultado.proyectos_sin_catalogar)} carpeta(s) sin catalogar: "
             + ", ".join(resultado.proyectos_sin_catalogar)
-            + ". Agrégalas a proyectos_conocidos en tu config si son legítimas."
+            + ". Revísalas con `iee.py --clasificar`; adopta con `--adoptar NOMBRE` (entra al respaldo) "
+            "o ignora con `--ignorar NOMBRE`."
         )
 
     if resultado.score_profundidad > 30:
@@ -520,10 +760,28 @@ def main() -> None:
         help="Imprime proyectos_conocidos (uno por línea, solo los que existen como carpeta) "
              "— útil para que un script de backup derive su lista de directorios a respaldar.",
     )
+    parser.add_argument("--clasificar", action="store_true",
+                        help="Explica cada carpeta sin catalogar (activa/copia/revisar) y sugiere el comando.")
+    parser.add_argument("--adoptar", nargs="+", metavar="NOMBRE",
+                        help="Agrega carpeta(s) a proyectos_conocidos (entran al respaldo).")
+    parser.add_argument("--ignorar", nargs="+", metavar="NOMBRE",
+                        help="Agrega carpeta(s) a raiz_esperados (esperadas, sin respaldo ni aviso).")
+    parser.add_argument("--motivo", default="", help="Texto que queda como comentario junto al nombre.")
+    parser.add_argument("--simular", action="store_true", help="Con --adoptar/--ignorar: muestra el cambio sin escribir.")
+    parser.add_argument("--confirmar-datos", action="store_true",
+                        help="Con --adoptar: acepta respaldar carpetas con bases de datos, planillas o .env.")
     args = parser.parse_args()
 
     raiz = Path(args.path).resolve()
-    cfg = cargar_config(_localizar_config(args.config))
+    ruta_config = _localizar_config(args.config)
+    cfg = cargar_config(ruta_config)
+
+    if args.adoptar or args.ignorar:
+        if args.adoptar and args.ignorar:
+            parser.error("usa --adoptar o --ignorar, no ambos a la vez")
+        accion = "adoptar" if args.adoptar else "ignorar"
+        raise SystemExit(catalogar(accion, args.adoptar or args.ignorar, raiz, ruta_config, args.motivo,
+                                   args.simular, args.confirmar_datos))
 
     if args.list_conocidos:
         for nombre in sorted(cfg.proyectos_conocidos):
@@ -532,6 +790,10 @@ def main() -> None:
         return
 
     resultado = escanear(raiz, cfg)
+
+    if args.clasificar:
+        imprimir_clasificacion(raiz, resultado.proyectos_sin_catalogar, cfg)
+        return
 
     if not args.no_history:
         historial_path = cfg.historial_path or (raiz / ".iee-history.json")
