@@ -33,6 +33,9 @@ python3 iee.py --fix                    # dry-run: plan de orden, no toca nada
 python3 iee.py --fix --apply            # ejecuta el plan (mueve huérfanos a _inbox/, borra carpetas vacías)
 python3 iee.py --list-conocidos         # lista tus proyectos_conocidos que existen como carpeta
 python3 iee.py --no-history             # no registrar esta corrida en el historial
+python3 iee.py --clasificar              # qué es cada carpeta sin catalogar y qué hacer con ella
+python3 iee.py --adoptar NOMBRE         # la agrega a proyectos_conocidos (entra a tu respaldo)
+python3 iee.py --ignorar NOMBRE         # la agrega a raiz_esperados (esperada, sin respaldo)
 ```
 
 `--fix` nunca toca directorios de proyectos ni archivos con extensiones
@@ -56,6 +59,23 @@ Sin config, IEE corre igual con defaults genéricos (ruido técnico común:
 propios — el primer run va a mostrar todas tus carpetas de primer nivel como
 "sin catalogar", lo cual es esperado: agrégalas a tu config a medida que las
 revisas.
+
+## Catastro asistido (carpetas sin catalogar)
+
+Cuando aparece una carpeta nueva, `--clasificar` la mira sin modificar nada y la ubica en una de tres clases:
+**activa** (la menciona tu crontab o una unidad systemd), **copia o prueba** (por el nombre: `.bak`, `test`,
+`backup`...) o **a revisar**. También informa tamaño, si tiene git y si contiene bases de datos, planillas o `.env`,
+y sugiere el comando.
+
+- `--adoptar NOMBRE` la agrega a `proyectos_conocidos` (si tu respaldo deriva su lista de ahí, entra al respaldo).
+  Si la carpeta tiene datos o `.env` se niega, salvo que agregues `--confirmar-datos`: respaldar copia todo eso fuera.
+- `--ignorar NOMBRE` la agrega a `raiz_esperados`: queda aceptada pero sin respaldo ni más avisos.
+- Ambos aceptan `--motivo "texto"` (queda como comentario junto al nombre) y `--simular` (muestra el cambio sin escribir).
+- Editan tu config como texto: conservan comentarios y orden, validan el YAML antes de escribir, escriben de forma
+  atómica, respaldan la versión anterior (`.bak-iee-<fecha>`, se conservan las últimas 3) y son idempotentes.
+- Nunca borran ni mueven carpetas; eso sigue siendo decisión tuya (o de `--fix`).
+
+Pruebas: `python3 -m unittest tests/test_catalogo.py`.
 
 ## Historial
 
